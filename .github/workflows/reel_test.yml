@@ -1,0 +1,64 @@
+name: Reel API test
+
+# PUBLIC repo: only code lives here. All data (schedule, captions, videos, logs) is in the PRIVATE repo
+# social-hub under data/vagantiya/. The job checks it out with HUB_TOKEN, runs the code against that folder,
+# saves results + a private log back to social-hub, and prints only a status line (public logs never show data).
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: reel_test
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  job:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          repository: devsuresh120-coder/social-hub
+          token: ${{ secrets.HUB_TOKEN }}
+          path: hub
+          sparse-checkout: data/vagantiya
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Put the code next to the data (not committed)
+        run: cp -r publish tools hub/data/vagantiya/
+      - run: pip install -q requests boto3 > /dev/null
+      - name: Reel test (output goes to the private log only)
+        working-directory: hub/data/vagantiya
+        env:
+          FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
+          FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_PUBLIC_URL: ${{ secrets.R2_PUBLIC_URL }}
+        run: |
+          mkdir -p logs; LOG="logs/reel_test_$(date -u +%Y%m%d_%H%M%S).txt"
+          set +e
+          {
+            cd publish && python reel_test.py
+          } > "$LOG" 2>&1
+          code=$?
+          ls -1t logs/reel_test_*.txt | tail -n +31 | xargs -r rm -f   # keep the last 30 logs
+          echo "STATUS=$code" >> "$GITHUB_ENV"
+          if [ $code -eq 0 ]; then echo "reel_test: ok"; else echo "::error::reel_test failed (details in social-hub/data/vagantiya/$LOG)"; fi
+      - name: Save results to social-hub (private)
+        if: always()
+        working-directory: hub
+        run: |
+          git config user.name "vagantiya-bot"
+          git config user.email "bot@users.noreply.github.com"
+          for p in data/vagantiya/logs data/vagantiya/queue/reel_test.json; do git add -A -f "$p" > /dev/null 2>&1 || true; done
+          if ! git diff --cached --quiet; then
+            git commit -qm "vagantiya: reel test [skip ci]"
+            for i in 1 2 3 4 5; do git pull -q --rebase --autostash && git push -q && break; sleep 5; done
+          fi
+          exit "${STATUS:-0}"

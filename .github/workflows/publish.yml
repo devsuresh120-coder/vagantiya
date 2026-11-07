@@ -1,0 +1,67 @@
+name: Publish to Facebook
+
+# PUBLIC repo: only code lives here. All data (schedule, captions, videos, logs) is in the PRIVATE repo
+# social-hub under data/vagantiya/. The job checks it out with HUB_TOKEN, runs the code against that folder,
+# saves results + a private log back to social-hub, and prints only a status line (public logs never show data).
+on:
+  schedule:
+    - cron: "50 6,12,14,16 * * *"   # ~20 min after the usual post times (12:00, 18:00, 20:00, 22:00 Sri Lanka)
+    - cron: "30 1 * * *"            # 07:00 catch-up
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "publish | dry-run"
+        default: "publish"
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  job:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          repository: devsuresh120-coder/social-hub
+          token: ${{ secrets.HUB_TOKEN }}
+          path: hub
+          sparse-checkout: data/vagantiya
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Put the code next to the data (not committed)
+        run: cp -r publish tools hub/data/vagantiya/
+      - run: pip install -q requests > /dev/null
+      - name: Publish (output goes to the private log only)
+        working-directory: hub/data/vagantiya
+        env:
+          FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
+          FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
+          DRY_RUN: ${{ github.event.inputs.action == 'dry-run' && '1' || '' }}
+        run: |
+          mkdir -p logs; LOG="logs/publish_$(date -u +%Y%m%d_%H%M%S).txt"
+          set +e
+          {
+            python publish/publish.py
+          } > "$LOG" 2>&1
+          code=$?
+          ls -1t logs/publish_*.txt | tail -n +31 | xargs -r rm -f   # keep the last 30 logs
+          echo "STATUS=$code" >> "$GITHUB_ENV"
+          if [ $code -eq 0 ]; then echo "publish: ok"; else echo "::error::publish failed (details in social-hub/data/vagantiya/$LOG)"; fi
+      - name: Save results to social-hub (private)
+        if: always()
+        working-directory: hub
+        run: |
+          git config user.name "vagantiya-bot"
+          git config user.email "bot@users.noreply.github.com"
+          for p in data/vagantiya/logs data/vagantiya/queue/posted.json data/vagantiya/queue/albums.json data/vagantiya/queue/redo.txt; do git add -A -f "$p" > /dev/null 2>&1 || true; done
+          if ! git diff --cached --quiet; then
+            git commit -qm "vagantiya: publish results [skip ci]"
+            for i in 1 2 3 4 5; do git pull -q --rebase --autostash && git push -q && break; sleep 5; done
+          fi
+          exit "${STATUS:-0}"
